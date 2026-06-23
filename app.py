@@ -1,363 +1,430 @@
 import streamlit as st
 import pandas as pd
-import datetime
 from streamlit_gsheets import GSheetsConnection
+import datetime
 
-# --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(page_title="SIEMBRA CAJA - ERP", layout="wide", page_icon="🌱")
+# Ajustes de configuración de la interfaz gráfica
+st.set_page_config(
+    page_title="Gestor Comercial de Caja y Stock Elite",
+    layout="wide",
+    page_icon="💼"
+)
 
-def recargar_app():
-    if hasattr(st, 'rerun'):
-        st.rerun()
-    else:
-        st.experimental_rerun()
-
-# --- CONEXIÓN AUTOMÁTICA A GOOGLE SHEETS ---
+# Inicialización segura de la conexión de Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-def cargar_datos(pestana):
+# Extracción de la URL del documento desde los secretos de entorno de forma segura
+try:
+    URL_DOCUMENTO = st.secrets["connections"]["gsheets"]["spreadsheet"]
+except Exception:
+    URL_DOCUMENTO = None
+
+def inicializar_almacen_datos():
+    """
+    Verifica de manera defensiva la existencia de las tablas en la nube.
+    Crea las estructuras iniciales si las pestañas requeridas no existen.
+    """
+    if not URL_DOCUMENTO:
+        st.error("Error crítico: No se ha detectado la propiedad 'spreadsheet' en los secretos de la conexión.")
+        return
     try:
-        # ttl="0d" obliga a traer los datos frescos de Google en tiempo real
-        return conn.read(worksheet=pestana, ttl="0d")
-    except Exception:
-        return pd.DataFrame()
+        # Acceso directo al cliente subyacente para manipulación de estructura
+        sh = conn.client._open_spreadsheet(spreadsheet=URL_DOCUMENTO)
+        hojas_en_nube = [ws.title for ws in sh.worksheets()]
+        
+        # Validación y construcción de la hoja de Inventario
+        if "Inventario" not in hojas_en_nube:
+            sh.add_worksheet(title="Inventario", rows="500", cols="6")
+            ws = sh.worksheet("Inventario")
+            ws.append_row()
+            
+        # Validación y construcción de la hoja de Movimientos de Caja
+        if "Movimientos" not in hojas_en_nube:
+            sh.add_worksheet(title="Movimientos", rows="1000", cols="6")
+            ws = sh.worksheet("Movimientos")
+            ws.append_row()
+            
+        # Validación y construcción de la hoja de Clientes (Corrigiendo el error del código original)
+        if "clientes" not in hojas_en_nube:
+            sh.add_worksheet(title="clientes", rows="500", cols="5")
+            ws = sh.worksheet("clientes")
+            ws.append_row()
+            
+    except Exception as e:
+        st.error(f"Error al inicializar las hojas de cálculo: {e}. Asegúrese de que el correo de la cuenta de servicio tenga privilegios de 'Editor' y que las APIs Sheets y Drive estén activas en Google Cloud.")
+
+# Ejecución del aprovisionamiento preventivo de las bases de datos
+if URL_DOCUMENTO:
+    inicializar_almacen_datos()
 
 def guardar_datos(df, pestana):
-    conn.update(worksheet=pestana, data=df)
+    """
+    Realiza la persistencia segura de DataFrames de forma explícita,
+    especificando el recurso e invalidando la caché temporal de Streamlit.
+    """
+    try:
+        conn.update(worksheet=pestana, data=df, spreadsheet=URL_DOCUMENTO)
+        st.cache_data.clear()
+        st.success(f"Pestaña '{pestana}' guardada con éxito.")
+    except Exception as e:
+        st.error(f"Excepción crítica al guardar en la pestaña '{pestana}': {e}. Valide la configuración de privilegios de edición en Google Sheets.")
 
-# --- CARGA DE DATOS DESDE LA NUBE ---
-df_clientes = cargar_datos("clientes")
-df_productos = cargar_datos("productos")
-df_ventas = cargar_datos("ventas")
-df_cobranzas = cargar_datos("cobranzas")
-df_compras = cargar_datos("compras")
-df_retiros = cargar_datos("retiros")
+def forzar_recarga_sistema():
+    """Invalida de manera global la caché de lectura y refresca la aplicación."""
+    st.cache_data.clear()
+    st.rerun()
 
-# Asegurar estructuras mínimas por si las pestañas están vacías
-if df_clientes.empty:
-    df_clientes = pd.DataFrame(columns=["ID", "Cédula", "Nombre", "Teléfono", "Correo", "Dirección", "Fecha de Nacimiento", "Estado", "Saldo"])
-if df_productos.empty:
-    df_productos = pd.DataFrame(columns=["Código", "Variedad", "Familia", "Stock"])
-if df_ventas.empty:
-    df_ventas = pd.DataFrame(columns=["Fecha", "Recibo", "Cliente", "Variedad", "Gramos", "Precio/g", "Total", "Condición"])
-if df_cobranzas.empty:
-    df_cobranzas = pd.DataFrame(columns=["Fecha", "Cliente", "Monto Abonado"])
-if df_compras.empty:
-    df_compras = pd.DataFrame(columns=["Fecha", "Concepto", "Proveedor", "Monto"])
-if df_retiros.empty:
-    df_retiros = pd.DataFrame(columns=["Fecha", "Usuario", "Monto"])
+# Carga selectiva de tablas de datos con mecanismos de TTL para mitigar cuotas de la API
+@st.cache_data(ttl=10)
+def cargar_inventario():
+    try:
+        df = conn.read(worksheet="Inventario", spreadsheet=URL_DOCUMENTO, ttl="10s")
+        if df.empty:
+            return pd.DataFrame(columns=)
+        # Formateo estricto de tipos de datos para prevenir inconsistencias algebraicas
+        df["Precio Venta"] = pd.to_numeric(df["Precio Venta"], errors="coerce").fillna(0.0)
+        df = pd.to_numeric(df, errors="coerce").fillna(0).astype(int)
+        df = pd.to_numeric(df, errors="coerce").fillna(0).astype(int)
+        df = df.astype(str)
+        return df
+    except Exception:
+        return pd.DataFrame(columns=)
 
-# Formateo numérico para evitar errores de cálculo en Pandas
-df_clientes["Saldo"] = pd.to_numeric(df_clientes["Saldo"], errors='coerce').fillna(0)
-df_productos["Stock"] = pd.to_numeric(df_productos["Stock"], errors='coerce').fillna(0)
+@st.cache_data(ttl=10)
+def cargar_movimientos():
+    try:
+        df = conn.read(worksheet="Movimientos", spreadsheet=URL_DOCUMENTO, ttl="10s")
+        if df.empty:
+            return pd.DataFrame(columns=)
+        df["Monto"] = pd.to_numeric(df["Monto"], errors="coerce").fillna(0.0)
+        df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce").fillna(0).astype(int)
+        return df
+    except Exception:
+        return pd.DataFrame(columns=)
 
-# --- MENÚ DE NAVEGACIÓN ---
-st.sidebar.title("🌱 SIEMBRA CAJA")
-st.sidebar.write("Sistema de Gestión Comercial")
-menu = st.sidebar.radio("Ir a:", [
-    "📊 Dashboard", 
-    "👥 Clientes y Cobranzas", 
-    "🌿 Inventario y Variedades", 
-    "🛍️ Registrar Venta", 
-    "💸 Compras y Retiros", 
-    "💰 Caja y Finanzas"
-])
+@st.cache_data(ttl=10)
+def cargar_clientes():
+    try:
+        df = conn.read(worksheet="clientes", spreadsheet=URL_DOCUMENTO, ttl="10s")
+        if df.empty:
+            return pd.DataFrame(columns=)
+        df = pd.to_numeric(df, errors="coerce").fillna(0.0)
+        df = df.astype(str)
+        return df
+    except Exception:
+        return pd.DataFrame(columns=)
 
-# ==========================================
-# --- MODULO 1: DASHBOARD ---
-# ==========================================
-if menu == "📊 Dashboard":
-    st.title("📊 Panel de Control General")
-    st.write("Resumen automatizado en tiempo real sincronizado con Google Sheets.")
+# Asignación de variables de estado de datos
+df_inventario = cargar_inventario()
+df_movimientos = cargar_movimientos()
+df_clientes = cargar_clientes()
+
+# Panel de navegación y control lateral
+st.sidebar.title("Sistema de Gestión Comercial")
+st.sidebar.markdown("---")
+modulo_activo = st.sidebar.radio(
+    "Seleccione el módulo que desea operar:",
+   
+)
+
+# Cálculo dinámico de indicadores clave para la barra lateral
+ingresos_totales = df_movimientos == "INGRESO"]["Monto"].sum()
+egresos_totales = df_movimientos == "EGRESO"]["Monto"].sum()
+saldo_caja_vigente = ingresos_totales - egresos_totales
+valor_activo_stock = (df_inventario * df_inventario["Precio Venta"]).sum()
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Indicadores de Desempeño")
+st.sidebar.metric("Saldo Financiero en Caja", f"${saldo_caja_vigente:,.2f}")
+st.sidebar.metric("Valor Neto de Existencias", f"${valor_activo_stock:,.2f}")
+
+if not URL_DOCUMENTO:
+    st.error("No se ha configurado la URL de Google Sheets en el archivo de secretos. Configure el sistema antes de proceder.")
+    st.stop()
+
+# ==============================================================================
+# MÓDULO: DASHBOARD COMERCIAL
+# ==============================================================================
+if modulo_activo == "Dashboard Comercial":
+    st.title("Panel de Control Comercial y Financiero")
     
-    total_ventas = pd.to_numeric(df_ventas["Total"], errors='coerce').sum() if not df_ventas.empty else 0
-    deuda_total = df_clientes["Saldo"].sum()
-    total_clientes = len(df_clientes)
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Ventas Totales Históricas ($)", f"${total_ventas:,.2f}")
-    col2.metric("Deuda Pendiente a Cobrar ($)", f"${deuda_total:,.2f}", delta="- Activa", delta_color="inverse")
-    col3.metric("Socios Registrados", total_clientes)
+    col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+    with col_kpi1:
+        st.metric("Total de Ventas / Ingresos", f"${ingresos_totales:,.2f}")
+    with col_kpi2:
+        st.metric("Total de Gastos / Egresos", f"${egresos_totales:,.2f}")
+    with col_kpi3:
+        st.metric("Rentabilidad de Caja", f"${saldo_caja_vigente:,.2f}", delta=f"{((saldo_caja_vigente/ingresos_totales)*100) if ingresos_totales > 0 else 0:.1f}% de Margen")
+    with col_kpi4:
+        alertas_criticas = df_inventario <= df_inventario].shape
+        st.metric("Alertas de Stock Crítico", alertas_criticas, delta=-alertas_criticas if alertas_criticas > 0 else 0, delta_color="inverse")
 
-# ==========================================
-# --- MODULO 2: CLIENTES Y COBRANZAS ---
-# ==========================================
-elif menu == "👥 Clientes y Cobranzas":
-    st.title("👥 Base de Datos y Cobros")
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 Listado de Socios", "➕ Nuevo Socio", "✏️ Editar Socio", "💳 Cobrar Deuda", "🗑️ Eliminar Socio"])
+    st.markdown("---")
     
-    with tab1:
-        st.dataframe(df_clientes, use_container_width=True)
-        
-    with tab2:
-        with st.form("nuevo_cliente"):
-            st.subheader("Registrar Nuevo Socio")
-            col1, col2 = st.columns(2)
-            with col1:
-                cedula = st.text_input("Cédula de Identidad")
-                nombre = st.text_input("Nombre Completo")
-                tel = st.text_input("Teléfono")
-            with col2:
-                correo = st.text_input("Correo Electrónico")
-                direccion = st.text_input("Dirección")
-                fecha_nac = st.text_input("Fecha de Nacimiento (DD/MM/AAAA)")
-            
-            enviar = st.form_submit_button("Guardar Socio")
-            if enviar and nombre:
-                nuevo_id = len(df_clientes) + 1
-                nueva_fila = {"ID": nuevo_id, "Cédula": cedula, "Nombre": nombre, "Teléfono": tel, "Correo": correo, "Dirección": direccion, "Fecha de Nacimiento": fecha_nac, "Estado": "Activo", "Saldo": 0}
-                df_clientes = pd.concat([df_clientes, pd.DataFrame([nueva_fila])], ignore_index=True)
-                guardar_datos(df_clientes, "clientes")
-                st.success("Socio guardado en la nube con éxito.")
-                recargar_app()
-
-    with tab3:
-        st.subheader("Modificar Datos de un Socio Existente")
-        if not df_clientes.empty:
-            cliente_a_editar = st.selectbox("Seleccione el Socio a editar", df_clientes["Nombre"].tolist(), key="select_editar")
-            idx_editar = df_clientes.index[df_clientes["Nombre"] == cliente_a_editar].tolist()[0]
-            datos_actuales = df_clientes.iloc[idx_editar]
-            
-            with st.form("editar_cliente"):
-                colA, colB = st.columns(2)
-                with colA:
-                    edit_cedula = st.text_input("Cédula de Identidad", value=str(datos_actuales.get("Cédula", "")))
-                    edit_nombre = st.text_input("Nombre Completo", value=str(datos_actuales.get("Nombre", "")))
-                    edit_tel = st.text_input("Teléfono", value=str(datos_actuales.get("Teléfono", "")))
-                    edit_estado = st.selectbox("Estado", ["Activo", "Inactivo"], index=0 if datos_actuales.get("Estado", "Activo") == "Activo" else 1)
-                with colB:
-                    edit_correo = st.text_input("Correo Electrónico", value=str(datos_actuales.get("Correo", "")))
-                    edit_direccion = st.text_input("Dirección", value=str(datos_actuales.get("Dirección", "")))
-                    edit_fecha_nac = st.text_input("Fecha de Nacimiento (DD/MM/AAAA)", value=str(datos_actuales.get("Fecha de Nacimiento", "")))
-                
-                btn_guardar_cambios = st.form_submit_button("Guardar Cambios")
-                if btn_guardar_cambios and edit_nombre:
-                    viejo_nombre = datos_actuales["Nombre"]
-                    df_clientes.at[idx_editar, "Cédula"] = edit_cedula
-                    df_clientes.at[idx_editar, "Nombre"] = edit_nombre
-                    df_clientes.at[idx_editar, "Teléfono"] = edit_tel
-                    df_clientes.at[idx_editar, "Correo"] = edit_correo
-                    df_clientes.at[idx_editar, "Dirección"] = edit_direccion
-                    df_clientes.at[idx_editar, "Fecha de Nacimiento"] = edit_fecha_nac
-                    df_clientes.at[idx_editar, "Estado"] = edit_estado
-                    
-                    if viejo_nombre != edit_nombre:
-                        if not df_ventas.empty:
-                            df_ventas.loc[df_ventas["Cliente"] == viejo_nombre, "Cliente"] = edit_nombre
-                            guardar_datos(df_ventas, "ventas")
-                        if not df_cobranzas.empty:
-                            df_cobranzas.loc[df_cobranzas["Cliente"] == viejo_nombre, "Cliente"] = edit_nombre
-                            guardar_datos(df_cobranzas, "cobranzas")
-                            
-                    guardar_datos(df_clientes, "clientes")
-                    st.success("Datos actualizados correctamente.")
-                    recargar_app()
+    col_analisis_1, col_analisis_2 = st.columns(2)
+    with col_analisis_1:
+        st.subheader("Evolución del Flujo de Efectivo")
+        if not df_movimientos.empty:
+            df_grafico = df_movimientos.copy()
+            df_grafico["Fecha_Visualizacion"] = pd.to_datetime(df_grafico["Fecha"]).dt.date
+            df_agrupado = df_grafico.groupby()["Monto"].sum().unstack(fill_value=0.0)
+            st.area_chart(df_agrupado)
         else:
-            st.info("No hay socios registrados para editar.")
-
-    with tab4:
-        st.subheader("Cobrar deuda a cliente")
-        deudores = df_clientes[df_clientes["Saldo"] > 0]
-        if deudores.empty:
-            st.info("No hay clientes con deudas pendientes actualmente.")
+            st.info("No se registran suficientes transacciones históricas para generar proyecciones.")
+            
+    with col_analisis_2:
+        st.subheader("Estado de Existencias Frente a Stock de Seguridad")
+        if not df_inventario.empty:
+            df_inventario_alertas = df_inventario.copy()
+            st.bar_chart(df_inventario_alertas.set_index("Producto")])
         else:
-            with st.form("cobrar_deuda"):
-                cliente_cobro = st.selectbox("Seleccionar Socio Deudor", deudores["Nombre"].tolist())
-                deuda_actual = deudores[deudores["Nombre"] == cliente_cobro]["Saldo"].values[0]
-                st.write(f"**Deuda actual:** ${deuda_actual:,.2f}")
-                max_deuda = int(deuda_actual) if deuda_actual >= 1 else 1
-                monto_pago = st.number_input("Monto a entregar ($)", min_value=1, step=10, max_value=max_deuda)
-                
-                btn_cobrar = st.form_submit_button("Registrar Cobranza")
-                if btn_cobrar:
-                    nueva_cobranza = {"Fecha": str(datetime.date.today()), "Cliente": cliente_cobro, "Monto Abonado": monto_pago}
-                    df_cobranzas = pd.concat([df_cobranzas, pd.DataFrame([nueva_cobranza])], ignore_index=True)
-                    guardar_datos(df_cobranzas, "cobranzas")
-                    
-                    idx_cli = df_clientes.index[df_clientes["Nombre"] == cliente_cobro].tolist()[0]
-                    df_clientes.at[idx_cli, "Saldo"] -= monto_pago
-                    guardar_datos(df_clientes, "clientes")
-                    st.success(f"Cobranza guardada.")
-                    recargar_app()
+            st.info("El catálogo de existencias está vacío. Ingrese productos para habilitar el gráfico.")
 
-    with tab5:
-        st.subheader("🗑️ Eliminar Socio")
-        if not df_clientes.empty:
-            with st.form("eliminar_cliente"):
-                cliente_a_borrar = st.selectbox("Seleccione el Socio a eliminar", df_clientes["Nombre"].tolist())
-                btn_eliminar = st.form_submit_button("Eliminar Permanentemente", type="primary")
-                if btn_eliminar:
-                    df_clientes = df_clientes[df_clientes["Nombre"] != cliente_a_borrar].reset_index(drop=True)
-                    guardar_datos(df_clientes, "clientes")
-                    st.success(f"Socio eliminado.")
-                    recargar_app()
-
-# ==========================================
-# --- MODULO 3: PRODUCTOS Y STOCK ---
-# ==========================================
-elif menu == "🌿 Inventario y Variedades":
-    st.title("🌿 Gestión de Inventario y Catálogo")
-    tab1, tab2 = st.tabs(["Inventario y Ajustes", "Agregar/Quitar Variedades"])
+# ==============================================================================
+# MÓDULO: PUNTO DE VENTA (VENTAS Y DESCUENTO AUTOMÁTICO DE STOCK)
+# ==============================================================================
+elif modulo_activo == "Punto de Venta":
+    st.title("Módulo de Facturación y Ventas Directas")
     
-    with tab1:
-        st.dataframe(df_productos, use_container_width=True)
-        st.subheader("🔄 Ingreso / Egreso Manual")
-        if not df_productos.empty:
-            with st.form("modificar_stock"):
-                var_seleccionada = st.selectbox("Seleccionar Variedad", df_productos["Variedad"].tolist())
-                tipo_mov = st.radio("Tipo de Movimiento", ["Entrada (+)", "Salida (-)"])
-                cantidad = st.number_input("Cantidad (Gramos)", min_value=1, step=1)
-                btn_actualizar = st.form_submit_button("Actualizar Inventario")
-                if btn_actualizar:
-                    idx = df_productos.index[df_productos['Variedad'] == var_seleccionada].tolist()[0]
-                    if "Entrada" in tipo_mov:
-                        df_productos.at[idx, "Stock"] += cantidad
-                    else:
-                        df_productos.at[idx, "Stock"] -= cantidad
-                    guardar_datos(df_productos, "productos")
-                    st.success("Stock sincronizado en Google Sheets.")
-                    recargar_app()
-
-    with tab2:
-        colA, colB = st.columns(2)
-        with colA:
-            with st.form("nueva_variedad"):
-                st.subheader("➕ Agregar Variedad")
-                nuevo_cod = st.text_input("Código")
-                nueva_var = st.text_input("Nombre de la Variedad")
-                nueva_fam = st.selectbox("Familia", ["Flores", "Extractos", "Comestibles", "Otros"])
-                btn_crear = st.form_submit_button("Agregar")
-                if btn_crear and nueva_var:
-                    nueva_fila = {"Código": nuevo_cod, "Variedad": nueva_var, "Familia": nueva_fam, "Stock": 0}
-                    df_productos = pd.concat([df_productos, pd.DataFrame([nueva_fila])], ignore_index=True)
-                    guardar_datos(df_productos, "productos")
-                    st.success("Variedad agregada de forma permanente.")
-                    recargar_app()
-        with colB:
-            with st.form("eliminar_variedad"):
-                st.subheader("🗑️ Eliminar Variedad")
-                if not df_productos.empty:
-                    var_a_borrar = st.selectbox("Seleccionar para eliminar", df_productos["Variedad"].tolist())
-                    btn_borrar = st.form_submit_button("Eliminar Permanentemente")
-                    if btn_borrar:
-                        df_productos = df_productos[df_productos["Variedad"] != var_a_borrar].reset_index(drop=True)
-                        guardar_datos(df_productos, "productos")
-                        st.success("Variedad removida.")
-                        recargar_app()
-
-# ==========================================
-# --- MODULO 4: REGISTRAR VENTA ---
-# ==========================================
-elif menu == "🛍️ Registrar Venta":
-    st.title("🛍️ Nueva Transacción")
-    if df_productos.empty or df_clientes.empty:
-        st.warning("Debes registrar al menos un cliente y una variedad antes de operar.")
+    if df_inventario.empty:
+        st.warning("El catálogo de inventario está vacío. Ingrese mercadería para poder facturar.")
     else:
-        with st.form("formulario_venta"):
-            cliente_sel = st.selectbox("Seleccionar Socio", df_clientes["Nombre"].tolist())
-            producto_sel = st.selectbox("Seleccionar Variedad", df_productos["Variedad"].tolist())
-            gramos = st.number_input("Cantidad (Gramos)", min_value=1, step=1)
-            precio = st.number_input("Precio por Gramo ($)", min_value=1, step=10)
-            condicion = st.radio("Condición de Pago", ["Paga en el momento", "Debe"])
+        with st.form("formulario_facturacion"):
+            st.subheader("Registrar Nueva Venta")
             
-            procesar = st.form_submit_button("Procesar Venta 🚀")
-            if procesar:
-                total = gramos * precio
-                nro_recibo = f"V-{len(df_ventas) + 1:03d}"
-                nueva_venta = {"Fecha": str(datetime.date.today()), "Recibo": nro_recibo, "Cliente": cliente_sel, "Variedad": producto_sel, "Gramos": gramos, "Precio/g": precio, "Total": total, "Condición": condicion}
+            # Formateo visual de artículos para facilitar la selección de mostrador
+            opciones_productos =} - {row['Producto']} (Disponible: {row} uds | Precio: ${row['Precio Venta']:,.2f})"
+                for _, row in df_inventario.iterrows()
+            ]
+            producto_seleccionado = st.selectbox("Seleccione el Producto a Vender:", opciones_productos)
+            
+            # Selección de cliente para control de cartera y resolución de la relación de clientes
+            opciones_clientes = ["Consumidor Final"]
+            if not df_clientes.empty:
+                opciones_clientes.extend(} - {row['Nombre']}"
+                    for _, row in df_clientes.iterrows()
+                ])
+            cliente_seleccionado = st.selectbox("Vincular con un Cliente Registrado:", opciones_clientes)
+            
+            cantidad_facturada = st.number_input("Cantidad a Comercializar (uds):", min_value=1, step=1, value=1)
+            comentarios_venta = st.text_input("Comentarios de Facturación:", "Venta directa realizada con éxito.")
+            
+            confirmar_venta = st.form_submit_button("Emitir Comprobante de Venta")
+            
+            if confirmar_venta:
+                # Recuperar clave de identificación del producto seleccionado
+                id_producto_filtrado = producto_seleccionado.split(" - ")
+                datos_producto = df_inventario == id_producto_filtrado].iloc
+                stock_disponible = datos_producto
+                precio_unitario = datos_producto["Precio Venta"]
+                nombre_articulo = datos_producto["Producto"]
                 
-                df_ventas = pd.concat([df_ventas, pd.DataFrame([nueva_venta])], ignore_index=True)
-                guardar_datos(df_ventas, "ventas")
-                
-                idx_prod = df_productos.index[df_productos["Variedad"] == producto_sel].tolist()[0]
-                df_productos.at[idx_prod, "Stock"] -= gramos
-                guardar_datos(df_productos, "productos")
-                
-                if condicion == "Debe":
-                    idx_cli = df_clientes.index[df_clientes["Nombre"] == cliente_sel].tolist()[0]
-                    df_clientes.at[idx_cli, "Saldo"] += total
-                    guardar_datos(df_clientes, "clientes")
+                # Validación estricta del stock de seguridad antes de procesar transacciones
+                if cantidad_facturada > stock_disponible:
+                    st.error(f"Fuga de existencias evitada: La cantidad que desea comercializar ({cantidad_facturada} uds) supera el inventario físico disponible ({stock_disponible} uds).")
+                else:
+                    monto_total_transaccion = float(precio_unitario * cantidad_facturada)
+                    marca_temporal = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     
-                st.success(f"Venta grabada en la nube. Total: ${total:,.2f}")
-                recargar_app()
+                    try:
+                        sh = conn.client._open_spreadsheet(spreadsheet=URL_DOCUMENTO)
+                        ws_movimientos = sh.worksheet("Movimientos")
+                        
+                        # Determinación del destinatario de la transacción comercial
+                        destinatario_cliente = "Consumidor Final"
+                        if cliente_seleccionado!= "Consumidor Final":
+                            destinatario_cliente = cliente_seleccionado.split(" - ")
+                        
+                        # 1. Registro financiero en el Libro de Caja
+                        ws_movimientos.append_row()
+                        
+                        # 2. Descuento del Stock en la Hoja de Inventario
+                        df_inventario_temporal = df_inventario.copy()
+                        fila_indice_producto = df_inventario_temporal == id_producto_filtrado].index
+                        df_inventario_temporal.at = int(stock_disponible - cantidad_facturada)
+                        
+                        # Actualización de la hoja de inventario físico
+                        guardar_datos(df_inventario_temporal, "Inventario")
+                        
+                        # Refresco de datos automático
+                        forzar_recarga_sistema()
+                        
+                    except Exception as ex:
+                        st.error(f"Error inesperado al persistir la transacción: {ex}")
 
-# ==========================================
-# --- MODULO 5: COMPRAS Y RETIROS ---
-# ==========================================
-elif menu == "💸 Compras y Retiros":
-    st.title("💸 Registro de Salidas de Dinero")
-    tab1, tab2 = st.tabs(["🛒 Compras y Gastos", "🏧 Retiros de Dinero"])
+# ==============================================================================
+# MÓDULO: GESTIÓN DE INVENTARIO (CONTROL DE STOCK)
+# ==============================================================================
+elif modulo_activo == "Gestión de Inventario (Stock)":
+    st.title("Módulo de Administración de Almacén e Inventarios")
     
-    with tab1:
-        with st.form("registro_compra"):
-            st.subheader("Registrar Compra/Gasto Operativo")
-            concepto = st.text_input("Concepto")
-            proveedor = st.text_input("Proveedor")
-            monto_compra = st.number_input("Monto del Gasto ($)", min_value=1, step=100)
-            btn_compra = st.form_submit_button("Registrar Gasto")
-            if btn_compra and concepto:
-                nueva_compra = {"Fecha": str(datetime.date.today()), "Concepto": concepto, "Proveedor": proveedor, "Monto": monto_compra}
-                df_compras = pd.concat([df_compras, pd.DataFrame([nueva_compra])], ignore_index=True)
-                guardar_datos(df_compras, "compras")
-                st.success("Gasto guardado.")
-                recargar_app()
-        st.dataframe(df_compras, use_container_width=True)
+    pestana_catalogo, pestana_alta_articulo = st.tabs()
+    
+    with pestana_catalogo:
+        st.subheader("Catálogo Vigente de Productos")
+        st.write("Edite directamente sobre las celdas de la tabla interactiva y haga clic en 'Guardar Cambios de Stock' para actualizar la base de datos.")
         
-    with tab2:
-        st.subheader("📊 Resumen de Retiros por Usuario")
-        if not df_retiros.empty:
-            df_retiros["Monto"] = pd.to_numeric(df_retiros["Monto"], errors='coerce').fillna(0)
-            resumen_usuarios = df_retiros.groupby("Usuario")["Monto"].sum().reset_index()
-            cols_resumen = st.columns(len(resumen_usuarios) if len(resumen_usuarios) > 0 else 1)
-            for i, row in resumen_usuarios.iterrows():
-                with cols_resumen[i]:
-                    st.metric(f"Total {row['Usuario']}", f"${row['Monto']:,.2f}")
+        # Uso de data_editor para la edición interactiva de existencias físicas en lote
+        catalogo_inventario_editado = st.data_editor(
+            df_inventario,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="inventario_editor_interactivo"
+        )
         
-        with st.form("registro_retiro"):
-            st.subheader("Registrar Nuevo Retiro")
-            usuario = st.selectbox("Usuario que realiza el retiro", ["Usuario 1", "Usuario 2"])
-            monto_retiro = st.number_input("Monto a retirar ($)", min_value=1, step=100)
-            btn_retiro = st.form_submit_button("Registrar Retiro")
-            if btn_retiro:
-                nuevo_retiro = {"Fecha": str(datetime.date.today()), "Usuario": usuario, "Monto": monto_retiro}
-                df_retiros = pd.concat([df_retiros, pd.DataFrame([nuevo_retiro])], ignore_index=True)
-                guardar_datos(df_retiros, "retiros")
-                st.success("Retiro registrado con éxito.")
-                recargar_app()
-        st.dataframe(df_retiros, use_container_width=True)
+        guardar_cambios_inventario = st.button("Guardar Cambios de Stock")
+        if guardar_cambios_inventario:
+            try:
+                # Sanitización de tipos de datos antes del volcado a Google Sheets
+                catalogo_inventario_editado["Precio Venta"] = pd.to_numeric(catalogo_inventario_editado["Precio Venta"], errors="coerce").fillna(0.0)
+                catalogo_inventario_editado = pd.to_numeric(catalogo_inventario_editado, errors="coerce").fillna(0).astype(int)
+                catalogo_inventario_editado = pd.to_numeric(catalogo_inventario_editado, errors="coerce").fillna(0).astype(int)
+                catalogo_inventario_editado = catalogo_inventario_editado.astype(str)
+                
+                guardar_datos(catalogo_inventario_editado, "Inventario")
+                forzar_recarga_sistema()
+            except Exception as ex:
+                st.error(f"Fallo al actualizar el catálogo de inventario: {ex}")
+                
+    with pestana_alta_articulo:
+        with st.form("formulario_alta_inventario"):
+            st.subheader("Alta de Producto")
+            nuevo_id_prod = st.text_input("Código o ID Único de Producto:")
+            nuevo_nombre_prod = st.text_input("Nombre Descriptivo del Artículo:")
+            nueva_categoria_prod = st.text_input("Categoría de Almacenamiento:", "General")
+            nuevo_precio_prod = st.number_input("Precio de Venta Unitario ($):", min_value=0.0, step=0.01)
+            nuevo_stock_prod = st.number_input("Inventario Inicial Disponible (uds):", min_value=0, step=1)
+            nuevo_minimo_prod = st.number_input("Límite Crítico (Stock Mínimo):", min_value=0, step=1, value=5)
+            
+            procesar_alta_prod = st.form_submit_button("Agregar Producto al Inventario")
+            
+            if procesar_alta_prod:
+                if nuevo_id_prod in df_inventario.values:
+                    st.error("Error de Clave Duplicada: El Código de Producto ingresado ya está registrado.")
+                elif not nuevo_id_prod or not nuevo_nombre_prod:
+                    st.error("Los campos de Código e ID de producto son obligatorios para el registro.")
+                else:
+                    try:
+                        nueva_fila_articulo = pd.DataFrame()
+                        
+                        df_inventario_consolidado = pd.concat([df_inventario, nueva_fila_articulo], ignore_index=True)
+                        guardar_datos(df_inventario_consolidado, "Inventario")
+                        forzar_recarga_sistema()
+                    except Exception as ex:
+                        st.error(f"Error al registrar el producto: {ex}")
 
-# ==========================================
-# --- MODULO 6: CAJA Y FINANZAS ---
-# ==========================================
-elif menu == "💰 Caja y Finanzas":
-    st.title("💰 Flujo de Fondos y Resultados")
+# ==============================================================================
+# MÓDULO: GESTIÓN DE CLIENTES (CORRECCIÓN Y SOPORTE DIRECTO DE "CLIENTES")
+# ==============================================================================
+elif modulo_activo == "Gestión de Clientes":
+    st.title("Módulo de Administración de Clientes y Cuentas por Cobrar")
     
-    ventas_efectivo = df_ventas[df_ventas["Condición"] == "Paga en el momento"]["Total"].astype(float).sum() if not df_ventas.empty else 0
-    cobranzas = df_cobranzas["Monto Abonado"].astype(float).sum() if not df_cobranzas.empty else 0
-    total_ingresos = ventas_efectivo + cobranzas
+    pestana_lista_clientes, pestana_alta_cliente = st.tabs()
     
-    compras = df_compras["Monto"].astype(float).sum() if not df_compras.empty else 0
-    retiros = df_retiros["Monto"].astype(float).sum() if not df_retiros.empty else 0
-    total_egresos = compras + retiros
+    with pestana_lista_clientes:
+        st.subheader("Clientes Registrados en la Cartera")
+        st.write("Modifique directamente los campos y haga clic en el botón 'Guardar Cambios de Clientes' para actualizar la base de datos.")
+        
+        clientes_editados = st.data_editor(
+            df_clientes,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="clientes_editor_interactivo"
+        )
+        
+        guardar_cambios_clientes = st.button("Guardar Cambios de Clientes")
+        if guardar_cambios_clientes:
+            try:
+                # Saneamiento de tipos de datos para prevenir inconsistencias relacionales
+                clientes_editados = pd.to_numeric(clientes_editados, errors="coerce").fillna(0.0)
+                clientes_editados = clientes_editados.astype(str)
+                
+                # Sincronización mediante la llamada corregida guardar_datos
+                guardar_datos(clientes_editados, "clientes")
+                forzar_recarga_sistema()
+            except Exception as ex:
+                st.error(f"Fallo al actualizar la cartera de clientes: {ex}")
+                
+    with pestana_alta_cliente:
+        with st.form("formulario_alta_clientes"):
+            st.subheader("Alta de Cliente")
+            nuevo_id_cli = st.text_input("ID o RUT Único del Cliente:")
+            nuevo_nombre_cli = st.text_input("Nombre Completo o Razón Social:")
+            nuevo_correo_cli = st.text_input("Correo Electrónico de Contacto:")
+            nuevo_telefono_cli = st.text_input("Teléfono de Contacto:")
+            nuevo_saldo_cli = st.number_input("Saldo Inicial o Crédito ($):", min_value=0.0, step=0.01, value=0.0)
+            
+            procesar_alta_cli = st.form_submit_button("Agregar Cliente a la Cartera")
+            
+            if procesar_alta_cli:
+                if nuevo_id_cli in df_clientes.values:
+                    st.error("Error de Clave Duplicada: El ID de Cliente ingresado ya se encuentra registrado.")
+                elif not nuevo_id_cli or not nuevo_nombre_cli:
+                    st.error("Los campos de ID de Cliente y Nombre son obligatorios para el registro.")
+                else:
+                    try:
+                        nueva_fila_cliente = pd.DataFrame()
+                        
+                        df_clientes_consolidado = pd.concat([df_clientes, nueva_fila_cliente], ignore_index=True)
+                        guardar_datos(df_clientes_consolidado, "clientes")
+                        forzar_recarga_sistema()
+                    except Exception as ex:
+                        st.error(f"Error al registrar el cliente: {ex}")
+
+# ==============================================================================
+# MÓDULO: CONTROL DE CAJA (INGRESO Y EGRESO DIRECTO)
+# ==============================================================================
+elif modulo_activo == "Control de Caja":
+    st.title("Módulo de Auditoría y Control del Libro de Caja")
     
-    caja_neta = total_ingresos - total_egresos
+    pestana_libro_diario, pestana_movimiento_manual = st.tabs()
     
-    st.markdown("### Estado de Flujo de Caja")
-    st.markdown("""
-    | Concepto | Monto |
-    | :--- | :--- |
-    | **(+) Ventas al Contado** |  ${:,.2f} |
-    | **(+) Cobro de Deudas (Atrasadas)** |  ${:,.2f} |
-    | --- | --- |
-    | **TOTAL INGRESOS CAJA** | **${:,.2f}** |
-    | | |
-    | **(-) Compras y Gastos Operativos** | -${:,.2f} |
-    | **(-) Retiros de Socios** | -${:,.2f} |
-    | --- | --- |
-    | **TOTAL EGRESOS CAJA** | **-${:,.2f}** |
-    | | |
-    | **(=) SALDO NETO EN CAJA HOY** | **${:,.2f}** |
-    """.format(ventas_efectivo, cobranzas, total_ingresos, compras, retiros, total_egresos, caja_neta))
-    
-    if caja_neta < 0:
-        st.error("⚠️ Atención: La caja está en negativo. Hay más salidas registradas que ingresos de efectivo.")
+    with pestana_libro_diario:
+        st.subheader("Auditoría Histórica de Transacciones")
+        
+        # Filtros de consulta para facilitar la auditoría contable
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            filtro_tipo_caja = st.multiselect("Filtrar por Tipo:",, default=)
+        with col_f2:
+            filtro_concepto_caja = st.text_input("Buscar Concepto o Detalle:")
+            
+        df_caja_filtrado = df_movimientos.copy()
+        if filtro_tipo_caja:
+            df_caja_filtrado = df_caja_filtrado.isin(filtro_tipo_caja)]
+        if filtro_concepto_caja:
+            df_caja_filtrado = df_caja_filtrado.str.contains(filtro_concepto_caja, case=False, na=False)]
+            
+        if not df_caja_filtrado.empty:
+            # Ordenar por fecha cronológica inversa
+            df_caja_filtrado = pd.to_datetime(df_caja_filtrado["Fecha"])
+            df_caja_filtrado = df_caja_filtrado.sort_values(by="Orden_Temporal", ascending=False).drop(columns=)
+            st.dataframe(df_caja_filtrado, use_container_width=True)
+        else:
+            st.info("No se encontraron transacciones financieras con los criterios de búsqueda especificados.")
+            
+    with pestana_movimiento_manual:
+        with st.form("formulario_movimiento_caja"):
+            st.subheader("Registrar Movimiento Manual de Caja")
+            tipo_flujo_manual = st.selectbox("Seleccione el Tipo de Movimiento:",)
+            detalle_flujo_manual = st.text_input("Concepto (Ej: Pago de Proveedores, Retiro de Caja, Depósito de Sencillo):")
+            monto_flujo_manual = st.number_input("Monto de la Operación ($):", min_value=0.01, step=0.01)
+            
+            procesar_flujo_manual = st.form_submit_button("Confirmar Operación de Caja")
+            
+            if procesar_flujo_manual:
+                if not detalle_flujo_manual:
+                    st.error("Debe proporcionar un concepto claro para garantizar la transparencia de la auditoría.")
+                else:
+                    try:
+                        sh = conn.client._open_spreadsheet(spreadsheet=URL_DOCUMENTO)
+                        ws_movimientos_manual = sh.worksheet("Movimientos")
+                        marca_temporal_manual = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        # Inserción de flujo de efectivo inmutable directa en Google Sheets
+                        ws_movimientos_manual.append_row()
+                        
+                        st.success("Transacción registrada con éxito en el Libro Diario.")
+                        forzar_recarga_sistema()
+                    except Exception as ex:
+                        st.error(f"Fallo al guardar el movimiento financiero manual: {ex}")
