@@ -128,10 +128,10 @@ modulo_activo = st.sidebar.radio(
 )
 
 # Cálculo dinámico de indicadores clave para la barra lateral
-ingresos_totales = df_movimientos == "INGRESO"]["Monto"].sum()
-egresos_totales = df_movimientos == "EGRESO"]["Monto"].sum()
+ingresos_totales = df_movimientos == "INGRESO"]["Monto"].sum() if not df_movimientos.empty else 0.0
+egresos_totales = df_movimientos == "EGRESO"]["Monto"].sum() if not df_movimientos.empty else 0.0
 saldo_caja_vigente = ingresos_totales - egresos_totales
-valor_activo_stock = (df_inventario * df_inventario["Precio Venta"]).sum()
+valor_activo_stock = (df_inventario * df_inventario["Precio Venta"]).sum() if not df_inventario.empty else 0.0
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Indicadores de Desempeño")
@@ -156,7 +156,7 @@ if modulo_activo == "Dashboard Comercial":
     with col_kpi3:
         st.metric("Rentabilidad de Caja", f"${saldo_caja_vigente:,.2f}", delta=f"{((saldo_caja_vigente/ingresos_totales)*100) if ingresos_totales > 0 else 0:.1f}% de Margen")
     with col_kpi4:
-        alertas_criticas = df_inventario <= df_inventario].shape
+        alertas_criticas = df_inventario <= df_inventario].shape if not df_inventario.empty else 0
         st.metric("Alertas de Stock Crítico", alertas_criticas, delta=-alertas_criticas if alertas_criticas > 0 else 0, delta_color="inverse")
 
     st.markdown("---")
@@ -241,7 +241,7 @@ elif modulo_activo == "Punto de Venta":
                         # 2. Descuento del Stock en la Hoja de Inventario
                         df_inventario_temporal = df_inventario.copy()
                         fila_indice_producto = df_inventario_temporal == id_producto_filtrado].index
-                        df_inventario_temporal.at = int(stock_disponible - cantidad_facturada)
+                        df_inventario_temporal.at[fila_indice_producto, "Stock Actual"] = int(stock_disponible - cantidad_facturada)
                         
                         # Actualización de la hoja de inventario físico
                         guardar_datos(df_inventario_temporal, "Inventario")
@@ -422,7 +422,10 @@ elif modulo_activo == "Control de Caja":
                         marca_temporal_manual = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         
                         # Inserción de flujo de efectivo inmutable directa en Google Sheets
-                        ws_movimientos_manual.append_row()
+                        ws_movimientos_manual.append_row([
+                            marca_temporal_manual, tipo_flujo_manual, detalle_flujo_manual, 
+                            float(monto_flujo_manual), "", 0
+                        ])
                         
                         st.success("Transacción registrada con éxito en el Libro Diario.")
                         forzar_recarga_sistema()
